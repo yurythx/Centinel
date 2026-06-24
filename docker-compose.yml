@@ -1,0 +1,115 @@
+version: '3.8'
+
+networks:
+  # Rede isolada do banco — apenas postgres e keycloak têm acesso
+  rede-db:
+    driver: bridge
+    internal: true
+  # Rede de serviços — aplicações e saída para o tunnel
+  rede-servicos:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  heimdall_config:
+  tailscale_state:
+
+services:
+
+  # ─── Banco de dados do Keycloak ───────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_DB: ${KC_DB_NAME}
+      POSTGRES_USER: ${KC_DB_USER}
+      POSTGRES_PASSWORD: ${KC_DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - rede-db
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${KC_DB_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── Identidade e Acesso ──────────────────────────────────────────────────
+  keycloak:
+    image: quay.io/keycloak/keycloak:latest
+    container_name: keycloak
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/${KC_DB_NAME}
+      KC_DB_USERNAME: ${KC_DB_USER}
+      KC_DB_PASSWORD: ${KC_DB_PASSWORD}
+      KC_HOSTNAME: ${KC_HOSTNAME}
+      KC_HOSTNAME_STRICT: "false"
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY: edge
+      KC_HEALTH_ENABLED: "true"
+      KEYCLOAK_ADMIN: ${KC_ADMIN_USER}
+      KEYCLOAK_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD}
+    command: start
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - rede-db
+      - rede-servicos
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health/ready || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # ─── Painel de controle visual ────────────────────────────────────────────
+  heimdall:
+    image: lscr.io/linuxserver/heimdall:latest
+    container_name: heimdall
+    volumes:
+      - heimdall_config:/config
+    networks:
+      - rede-servicos
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:80 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ─── Túnel público (Cloudflare) ───────────────────────────────────────────
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflared
+    command: tunnel run --token ${CF_TUNNEL_TOKEN}
+    networks:
+      - rede-servicos
+    restart: always
+    depends_on:
+      keycloak:
+        condition: service_healthy
+      heimdall:
+        condition: service_healthy
+
+  # ─── VPN privada (Tailscale) ──────────────────────────────────────────────
+  tailscale:
+    image: tailscale/tailscale:latest
+    container_name: tailscale
+    hostname: vps-central-lab
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY}
+      TS_STATE_DIR: /var/lib/tailscale
+    volumes:
+      - tailscale_state:/var/lib/tailscale
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    networks:
+      - rede-servicos
+    restart: always

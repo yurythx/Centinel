@@ -1,0 +1,7 @@
+# Segredos — nunca commitar
+.env
+
+# Dados persistidos localmente
+heimdall/
+tailscale/
+backups/
